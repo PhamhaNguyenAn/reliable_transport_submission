@@ -27,23 +27,17 @@ def make_packet(pkt_type, seq_num, payload=b""):
 
 
 def parse_packet(packet):
-    """Return (header, payload) if the packet is well formed and intact.
-
-    Corrupted packets (including ones whose length field was mangled by the
-    proxy) are rejected here.  Returns (None, None) otherwise.
-    """
+    """Return (header, payload) if the packet is well formed and intact."""
     if len(packet) < HEADER_SIZE:
         return None, None
 
     header = PacketHeader(packet[:HEADER_SIZE])
-    if header.length < 0 or header.length > len(packet) - HEADER_SIZE:
-        # A jammed length field must never make us index past the buffer.
+    if header.length > len(packet) - HEADER_SIZE:
         return None, None
 
     payload = packet[HEADER_SIZE : HEADER_SIZE + header.length]
 
-    # Recompute the checksum over a freshly built header (checksum field = 0)
-    # so that a cached serialization can never hide a modification.
+    # Recompute the checksum over a freshly built header (checksum field = 0).
     clean_header = PacketHeader(
         type=header.type,
         seq_num=header.seq_num,
@@ -74,19 +68,25 @@ def receive_ack(sock, timeout):
 
 
 def sender(receiver_ip, receiver_port, window_size):
+    """TODO: Open socket and send message from sys.stdin."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # pkt_header = PacketHeader(type=2, seq_num=10, length=14)
+    # pkt_header.checksum = compute_checksum(pkt_header / "Hello, world!\n")
+    # pkt = pkt_header / "Hello, world!\n"
+    # s.sendto(bytes(pkt), (receiver_ip, receiver_port))
+
     data = sys.stdin.buffer.read()
     chunks = [data[i : i + MAX_PAYLOAD] for i in range(0, len(data), MAX_PAYLOAD)]
     total = len(chunks)  # DATA packets are numbered 1..total
 
     dest = (receiver_ip, receiver_port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # ------------------------------------------------------------- START phase
     # The first START packet has seq_num 0 and its ACK has seq_num 1.
     start_packet = make_packet(START, 0)
     while True:
-        sock.sendto(start_packet, dest)
-        ack = receive_ack(sock, TIMEOUT)
+        s.sendto(start_packet, dest)
+        ack = receive_ack(s, TIMEOUT)
         if ack is not None and ack >= 1:
             break
         # START (or its ACK) was lost: retransmit the START packet.
@@ -104,7 +104,7 @@ def sender(receiver_ip, receiver_port, window_size):
         """Send new packets until the sender window is full."""
         nonlocal next_seq
         while next_seq <= total and next_seq < base + window_size:
-            sock.sendto(packets[next_seq], dest)
+            s.sendto(packets[next_seq], dest)
             sent.add(next_seq)
             next_seq += 1
 
@@ -112,7 +112,7 @@ def sender(receiver_ip, receiver_port, window_size):
     timer = time.time()
 
     while base <= total:
-        ack = receive_ack(sock, 0.02)
+        ack = receive_ack(s, 0.02)
 
         if ack is not None and ack > base:
             # Cumulative ACK: every packet with seq < ack has arrived.
@@ -127,20 +127,20 @@ def sender(receiver_ip, receiver_port, window_size):
         if time.time() - timer >= TIMEOUT:
             # The window has not advanced: retransmit everything in it.
             for seq in sorted(sent):
-                sock.sendto(packets[seq], dest)
+                s.sendto(packets[seq], dest)
             timer = time.time()
 
     # --------------------------------------------------------------- END phase
     end_packet = make_packet(END, total + 1)
-    sock.sendto(end_packet, dest)
+    s.sendto(end_packet, dest)
 
     deadline = time.time() + TIMEOUT
     while time.time() < deadline:
-        ack = receive_ack(sock, max(0.0, deadline - time.time()))
+        ack = receive_ack(s, max(0.0, deadline - time.time()))
         if ack is not None and ack >= total + 1:
             break
     # Whether or not the END ACK arrived, 500 ms after sending END we are done.
-    sock.close()
+    s.close()
 
 
 def main():

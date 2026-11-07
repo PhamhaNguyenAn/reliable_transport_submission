@@ -32,7 +32,7 @@ def parse_packet(packet):
         return None, None
 
     header = PacketHeader(packet[:HEADER_SIZE])
-    if header.length < 0 or header.length > len(packet) - HEADER_SIZE:
+    if header.length > len(packet) - HEADER_SIZE:
         return None, None
 
     payload = packet[HEADER_SIZE : HEADER_SIZE + header.length]
@@ -67,18 +67,24 @@ def receive_ack(sock, timeout):
 
 
 def sender(receiver_ip, receiver_port, window_size):
+    """TODO: Open socket and send message from sys.stdin."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # pkt_header = PacketHeader(type=2, seq_num=10, length=14)
+    # pkt_header.checksum = compute_checksum(pkt_header / "Hello, world!\n")
+    # pkt = pkt_header / "Hello, world!\n"
+    # s.sendto(bytes(pkt), (receiver_ip, receiver_port))
+
     data = sys.stdin.buffer.read()
     chunks = [data[i : i + MAX_PAYLOAD] for i in range(0, len(data), MAX_PAYLOAD)]
     total = len(chunks)  # DATA packets are numbered 1..total
 
     dest = (receiver_ip, receiver_port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # ------------------------------------------------------------- START phase
     start_packet = make_packet(START, 0)
     while True:
-        sock.sendto(start_packet, dest)
-        ack = receive_ack(sock, TIMEOUT)
+        s.sendto(start_packet, dest)
+        ack = receive_ack(s, TIMEOUT)
         if ack is not None and ack >= 1:
             break
 
@@ -104,7 +110,7 @@ def sender(receiver_ip, receiver_port, window_size):
         """Send new packets while respecting the receiver's window."""
         nonlocal next_seq
         while next_seq <= total and next_seq < base + window_size:
-            sock.sendto(packets[next_seq], dest)
+            s.sendto(packets[next_seq], dest)
             sent.add(next_seq)
             next_seq += 1
 
@@ -112,14 +118,14 @@ def sender(receiver_ip, receiver_port, window_size):
     timer = time.time()
 
     while base <= total:
-        ack = receive_ack(sock, 0.02)
+        ack = receive_ack(s, 0.02)
 
         if ack is not None:
             if ack == 1 and data1_suspect:
                 data1_suspect = False
                 if total >= 1 and base == 1:
                     # Confirm DATA packet 1; see the comment above.
-                    sock.sendto(packets[1], dest)
+                    s.sendto(packets[1], dest)
             elif base <= ack < next_seq:
                 # Record the individual ACK for this packet.
                 acked.add(ack)
@@ -140,19 +146,19 @@ def sender(receiver_ip, receiver_port, window_size):
             # Retransmit only the packets that were not acknowledged.  One
             # single timer covers the whole window.
             for seq in sorted(sent):
-                sock.sendto(packets[seq], dest)
+                s.sendto(packets[seq], dest)
             timer = time.time()
 
     # --------------------------------------------------------------- END phase
     end_packet = make_packet(END, total + 1)
-    sock.sendto(end_packet, dest)
+    s.sendto(end_packet, dest)
 
     deadline = time.time() + TIMEOUT
     while time.time() < deadline:
-        ack = receive_ack(sock, max(0.0, deadline - time.time()))
+        ack = receive_ack(s, max(0.0, deadline - time.time()))
         if ack is not None and ack >= total + 1:
             break
-    sock.close()
+    s.close()
 
 
 def main():

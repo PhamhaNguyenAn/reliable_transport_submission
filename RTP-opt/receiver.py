@@ -23,34 +23,10 @@ def make_packet(pkt_type, seq_num, payload=b""):
     return bytes(header) + payload
 
 
-def parse_packet(packet):
-    """Return (header, payload) for an intact packet, or (None, None)."""
-    if len(packet) < HEADER_SIZE:
-        return None, None
-
-    header = PacketHeader(packet[:HEADER_SIZE])
-    if header.length < 0 or header.length > len(packet) - HEADER_SIZE:
-        return None, None
-
-    payload = packet[HEADER_SIZE : HEADER_SIZE + header.length]
-
-    clean_header = PacketHeader(
-        type=header.type,
-        seq_num=header.seq_num,
-        length=header.length,
-        checksum=0,
-    )
-    if compute_checksum(bytes(clean_header) + payload) != header.checksum:
-        return None, None
-
-    return header, payload
-
-
 def receiver(receiver_ip, receiver_port, window_size):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((receiver_ip, receiver_port))
-
-    out = sys.stdout.buffer
+    """TODO: Listen on socket and print received message to sys.stdout."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((receiver_ip, receiver_port))
 
     in_connection = False
     peer = None
@@ -58,38 +34,47 @@ def receiver(receiver_ip, receiver_port, window_size):
     buffered = {}  # out-of-order packets waiting for the gap to be filled
 
     while True:
-        packet, address = sock.recvfrom(2048)
-        header, payload = parse_packet(packet)
+        # Receive packet; address includes both IP and port
+        pkt, address = s.recvfrom(2048)
 
-        # Corrupted packets are silently dropped (no ACK).
-        if header is None:
+        # Extract header and payload
+        pkt_header = PacketHeader(pkt[:16])
+        msg = pkt[16 : 16 + pkt_header.length]
+
+        # Verity checksum
+        pkt_checksum = pkt_header.checksum
+        pkt_header.checksum = 0
+        computed_checksum = compute_checksum(pkt_header / msg)
+        if pkt_checksum != computed_checksum:
+            # print("checksums not match")
             continue
+        # print(msg)
 
-        if header.type == START:
+        if pkt_header.type == START:
             if not in_connection:
                 in_connection = True
                 peer = address
                 expected = 1
                 buffered.clear()
-                sock.sendto(make_packet(ACK, 1), address)
+                s.sendto(make_packet(ACK, 1), address)
             elif address == peer:
                 # Retransmitted START for the current connection.
-                sock.sendto(make_packet(ACK, 1), address)
+                s.sendto(make_packet(ACK, 1), address)
             continue
 
         # Everything else must belong to the active connection.
         if not in_connection or address != peer:
             continue
 
-        if header.type == END:
-            sock.sendto(make_packet(ACK, header.seq_num + 1), address)
-            out.flush()
+        if pkt_header.type == END:
+            s.sendto(make_packet(ACK, pkt_header.seq_num + 1), address)
+            sys.stdout.buffer.flush()
             return
 
-        if header.type != DATA:
+        if pkt_header.type != DATA:
             continue
 
-        seq = header.seq_num
+        seq = pkt_header.seq_num
 
         # Drop packets outside the receiver window [expected, expected + W).
         if seq >= expected + window_size:
@@ -98,21 +83,21 @@ def receiver(receiver_ip, receiver_port, window_size):
         if seq < expected:
             # Duplicate of an already delivered packet.  The optimization is
             # to ACK the exact sequence number of the packet we received.
-            sock.sendto(make_packet(ACK, seq), address)
+            s.sendto(make_packet(ACK, seq), address)
             continue
 
         # In-order or buffered out-of-order packet: store it.
         if seq not in buffered:
-            buffered[seq] = payload
+            buffered[seq] = msg
 
         # Deliver contiguous data in order.
         while expected in buffered:
-            out.write(buffered.pop(expected))
+            sys.stdout.buffer.write(buffered.pop(expected))
             expected += 1
 
-        out.flush()
+        sys.stdout.buffer.flush()
         # Individual (non-cumulative) ACK: echo the received sequence number.
-        sock.sendto(make_packet(ACK, seq), address)
+        s.sendto(make_packet(ACK, seq), address)
 
 
 def main():
