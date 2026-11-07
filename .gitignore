@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+RTP-base/output.txt
+RTP-opt/output.txt
